@@ -1,6 +1,7 @@
 import * as express from "express"
 import * as fs from "fs"
 import * as path from "path"
+import * as crypto from "crypto"
 import * as Raven from "raven"
 import * as winston from "winston"
 import * as Hub from "../hub"
@@ -151,7 +152,22 @@ export default class Server implements Hub.RouteBuilder {
       if (isOauthAction(action) || isOauthActionV2(action)) {
         const parts = uparse.parse(req.url, true)
         const state = parts.query.state
-        const url = await (action as OAuthAction).oauthUrl(this.oauthRedirectUrl(action), state)
+        
+        // Generate nonce for CSRF protection
+        const nonce = crypto.randomBytes(16).toString("hex")
+        
+        // Set secure cookie with nonce
+        res.cookie("action_hub_state", nonce, {
+          httpOnly: true,
+          secure: true,
+          sameSite: "none",
+          maxAge: 3600000, // 1 hour
+        })
+        
+        // Combine nonce with original state
+        const combinedState = `${nonce}.${state}`
+        
+        const url = await (action as OAuthAction).oauthUrl(this.oauthRedirectUrl(action), combinedState)
         res.redirect(url)
       } else {
         throw "Action does not support OAuth."
@@ -183,13 +199,41 @@ export default class Server implements Hub.RouteBuilder {
       const request = Hub.ActionRequest.fromRequest(req)
       const action = await Hub.findAction(req.params.actionId, { lookerVersion: request.lookerVersion })
       try {
+        // Verify that the state contained the nonce that was set in /actions/:actionId/oauth
+        const stateParam = req.query.state as string
+        if (!stateParam) {
+          throw new Error("Missing state parameter.")
+        }
+        
+        const parts = stateParam.split(".")
+        if (parts.length < 2) {
+          throw new Error("Invalid state parameter format.")
+        }
+        
+        const nonce = parts[0]
+        const originalState = parts.slice(1).join(".")
+        
+        const cookies = this.parseCookies(req.headers.cookie)
+        const expectedNonce = cookies["action_hub_state"]
+        
+        if (!expectedNonce || expectedNonce !== nonce) {
+          res.status(403).send("CSRF validation failed.")
+          return
+        }
+        
+        // Clear the cookie
+        res.clearCookie("action_hub_state")
+        
+        // Rewrite req.query.state with original state for the action
+        const modifiedQuery = { ...req.query, state: originalState }
+        
         if (isOauthAction(action)) {
-          await (action as OAuthAction).oauthFetchInfo(req.query as {[key: string]: string},
+          await (action as OAuthAction).oauthFetchInfo(modifiedQuery as {[key: string]: string},
               this.oauthRedirectUrl(action))
           res.statusCode = 200
           res.send(`<html><script>window.close()</script><body>You may now close this tab.</body></html>`)
         } else if (isOauthActionV2(action)) {
-          const redirUrl = await (action as OAuthActionV2).oauthHandleRedirect(req.query as {[key: string]: string},
+          const redirUrl = await (action as OAuthActionV2).oauthHandleRedirect(modifiedQuery as {[key: string]: string},
                 this.oauthRedirectUrl(action))
           if (redirUrl === "") {
             res.statusCode = 200
@@ -201,8 +245,8 @@ export default class Server implements Hub.RouteBuilder {
           throw "Action does not support OAuth."
         }
       } catch (e: any) {
-        this.logPromiseFail(req, res, e)
-        res.statusCode = 400
+        this.logError(req, res, "Error in oauth_redirect")
+        res.status(400).send(e.message || e)
       }
     })
 
@@ -313,18 +357,7 @@ export default class Server implements Hub.RouteBuilder {
     })
   }
 
-  private logPromiseFail(req: express.Request, res: express.Response, e: any) {
-    this.logError(req, res, "Error on request")
-    if (typeof (e) === "string") {
-      res.status(404)
-      res.json({ success: false, error: e })
-      this.logError(req, res, e)
-    } else {
-      res.status(500)
-      res.json({ success: false, error: "Internal server error." })
-      this.logError(req, res, e)
-    }
-  }
+
 
   private logInfo(req: express.Request, res: express.Response, message: any, options: any = {}) {
     winston.info(message, {
@@ -348,6 +381,19 @@ export default class Server implements Hub.RouteBuilder {
       instanceId: req.header("x-looker-instance"),
       webhookId: req.header("x-looker-webhook-id"),
     }
+  }
+
+  private parseCookies(cookieHeader: string | undefined): {[key: string]: string} {
+    const cookies: {[key: string]: string} = {}
+    if (cookieHeader) {
+      cookieHeader.split(";").forEach((cookie) => {
+        const parts = cookie.split("=")
+        if (parts.length === 2) {
+          cookies[parts[0].trim()] = parts[1].trim()
+        }
+      })
+    }
+    return cookies
   }
 
   private absUrl(rootRelativeUrl: string) {
