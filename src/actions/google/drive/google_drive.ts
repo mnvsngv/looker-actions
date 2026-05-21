@@ -539,7 +539,7 @@ export class GoogleDriveAction extends Hub.OAuthActionV2 {
         tokenPayload = new Hub.ActionToken(state.tokens, state.redirect)
       }
       if (tokenPayload === null) {
-        winston.error("Invalid state_json", {webhookId: requestWebhookId})
+        winston.error(`Invalid state_json: ${stateJson}`, {webhookId: requestWebhookId})
       }
       return tokenPayload
   }
