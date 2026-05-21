@@ -306,7 +306,15 @@ export class AirtableAction extends Hub.OAuthAction {
     const clientId = process.env.AIRTABLE_CLIENT_ID ? process.env.AIRTABLE_CLIENT_ID : "must exist"
 
     const actionCrypto = new Hub.ActionCrypto()
-    const plaintext = await actionCrypto.decrypt(encryptedState).catch((err: string) => {
+    
+    // Strip CSRF nonce if present (from server.ts /oauth wrapper)
+    let stateToDecrypt = encryptedState
+    const parts = encryptedState.split(".")
+    if (parts.length >= 2) {
+      stateToDecrypt = parts.slice(1).join(".")
+    }
+
+    const plaintext = await actionCrypto.decrypt(stateToDecrypt).catch((err: string) => {
       winston.error("Encryption not correctly configured" + err)
       throw err
     })

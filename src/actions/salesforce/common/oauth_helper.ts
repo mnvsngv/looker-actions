@@ -64,8 +64,16 @@ export class SalesforceOauthHelper {
     winston.debug(`beginning oauth flow with redirect url: ${redirectUri}`)
 
     const actionCrypto = new Hub.ActionCrypto()
+
+    // Strip CSRF nonce if present (from server.ts /oauth wrapper)
+    let payloadToDecrypt = encryptedPayload
+    const parts = encryptedPayload.split(".")
+    if (parts.length >= 2) {
+      payloadToDecrypt = parts.slice(1).join(".")
+    }
+
     const plaintext = await actionCrypto
-      .decrypt(encryptedPayload)
+      .decrypt(payloadToDecrypt)
       .catch((err: string) => {
         winston.error("Encryption not correctly configured" + err)
         throw err
